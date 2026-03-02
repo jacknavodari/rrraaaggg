@@ -37,6 +37,7 @@ function App({ onReady }) {
   const [showSaveModal, setShowSaveModal] = useState(false); // For save/download modal
   const [editingMessageIndex, setEditingMessageIndex] = useState(null); // For editing messages
   const [editedMessageContent, setEditedMessageContent] = useState(''); // Edited content
+  const [docToDelete, setDocToDelete] = useState(null); // For delete confirmation
 
   // Load documents on mount
   useEffect(() => {
@@ -135,6 +136,31 @@ function App({ onReady }) {
       console.error("Failed to load documents", err);
       setError("Failed to load documents.");
     }
+  };
+
+  // Start delete process with confirmation
+  const confirmDeleteDocument = (docId) => {
+    setDocToDelete(docId);
+  };
+
+  // Execute delete after confirmation
+  const executeDeleteDocument = async () => {
+    if (!docToDelete) return;
+    
+    try {
+      await deleteDocument(docToDelete);
+      setDocToDelete(null);
+      loadDocuments();
+      console.log('[RAG] Document deleted successfully');
+    } catch (err) {
+      console.error('Error deleting document:', err);
+      setError('Failed to delete document.');
+    }
+  };
+
+  // Cancel delete
+  const cancelDeleteDocument = () => {
+    setDocToDelete(null);
   };
 
   // Send entire document content to chat - puts text in INPUT box
@@ -579,13 +605,6 @@ Remember: User wants complete, natural conversations - not short summaries! For 
     }
   };
 
-  const handleDelete = async (id) => {
-    if (window.confirm('Delete this document?')) {
-      await deleteDocument(id);
-      loadDocuments();
-    }
-  };
-
   return (
     <div className="h-screen flex bg-slate-950 text-white">
       {/* Sidebar */}
@@ -796,8 +815,9 @@ Remember: User wants complete, natural conversations - not short summaries! For 
                     <Languages className="w-4 h-4 text-purple-400" />
                   </button>
                   <button
-                    onClick={() => handleDelete(doc.id)}
+                    onClick={() => confirmDeleteDocument(doc.id)}
                     className="p-1 hover:bg-red-500/20 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                    title="Delete document"
                   >
                     <Trash2 className="w-4 h-4 text-red-400" />
                   </button>
@@ -1081,6 +1101,38 @@ Remember: User wants complete, natural conversations - not short summaries! For 
                   className="w-full px-6 py-2.5 bg-slate-700 hover:bg-slate-600 text-white rounded-lg font-medium transition-colors"
                 >
                   Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Document Confirmation Modal */}
+      {docToDelete && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="bg-slate-900 border-2 border-red-500/50 rounded-2xl p-6 max-w-md w-full mx-4 shadow-2xl transform transition-all animate-in fade-in zoom-in duration-200">
+            <div className="text-center">
+              <div className="mx-auto w-16 h-16 bg-red-500/20 rounded-full flex items-center justify-center mb-4">
+                <Trash2 className="w-8 h-8 text-red-500" />
+              </div>
+              <h3 className="text-xl font-bold text-white mb-2">Delete Document?</h3>
+              <p className="text-slate-400 mb-6">
+                This will permanently delete this document and all its data. This action cannot be undone!
+              </p>
+              <div className="flex gap-3 justify-center">
+                <button
+                  onClick={cancelDeleteDocument}
+                  className="px-6 py-2.5 bg-slate-700 hover:bg-slate-600 text-white rounded-lg font-medium transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={executeDeleteDocument}
+                  className="px-6 py-2.5 bg-red-600 hover:bg-red-500 text-white rounded-lg font-medium transition-colors flex items-center gap-2"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  Yes, Delete It
                 </button>
               </div>
             </div>
