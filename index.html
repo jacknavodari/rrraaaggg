@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>rrraaaggg - RAG Document Processor</title>
+    <style>
+      /* Prevent white flash on load */
+      body {
+        margin: 0;
+        padding: 0;
+        background-color: #020617; /* slate-950 */
+        color: #f1f5f9; /* slate-100 */
+      }
+      
+      /* Loading screen */
+      #loading-screen {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: linear-gradient(135deg, #020617 0%, #1e293b 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 9999;
+      }
+      
+      .loader {
+        text-align: center;
+      }
+      
+      .spinner {
+        width: 50px;
+        height: 50px;
+        border: 4px solid rgba(59, 130, 246, 0.2);
+        border-top-color: #3b82f6;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+        margin: 0 auto 20px;
+      }
+      
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+      
+      .loading-text {
+        color: #94a3b8;
+        font-size: 14px;
+        font-weight: 500;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Loading screen (removed by React when ready) -->
+    <div id="loading-screen">
+      <div class="loader">
+        <div class="spinner"></div>
+        <div class="loading-text">Loading rrraaaggg...</div>
+      </div>
+    </div>
+    
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
