@@ -31,20 +31,42 @@ const cosineSimilarity = (vecA, vecB) => {
     return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 };
 
-export const addDocument = async (file, text, embeddingModel = 'nomic-embed-text', ollamaHost = 'http://192.168.0.136:11434') => {
+export const addDocument = async (file, text, embeddingModel = 'nomic-embed-text', ollamaHost = 'http://localhost:11434') => {
     const db = await initDB();
     const docId = uuidv4();
 
     console.log(`[RAG] Processing ${file.name}: ${text.length} chars`);
 
-    // Split into chunks
-    const chunks = text.split(/\n\s*\n/).filter(p => p.trim())
-        .flatMap(para => {
-            if (para.length < 1000) return [para];
-            return para.match(/.{1,1000}/g) || [para];
-        });
+    // Verify embedding model exists
+    try {
+        const tagsResponse = await fetch(`${ollamaHost}/api/tags`);
+        if (tagsResponse.ok) {
+            const data = await tagsResponse.json();
+            const exists = data.models?.some(m => m.name === embeddingModel || m.name.split(':')[0] === embeddingModel);
+            if (!exists) {
+                throw new Error(`Embedding model "${embeddingModel}" not found in Ollama. Please run "ollama pull ${embeddingModel}"`);
+            }
+        }
+    } catch (e) {
+        console.warn("[RAG] Could not verify model existence:", e.message);
+    }
 
-    console.log(`[RAG] Created ${chunks.length} chunks`);
+    // Split into smaller, safer chunks (500 characters max for high compatibility)
+    const chunks = [];
+    const rawParagraphs = text.split(/\n\s*\n/).filter(p => p.trim());
+    
+    for (const para of rawParagraphs) {
+        if (para.length <= 800) {
+            chunks.push(para);
+        } else {
+            // Split long paragraphs into 800-char chunks with 100-char overlap
+            for (let i = 0; i < para.length; i += 700) {
+                chunks.push(para.substring(i, i + 800));
+            }
+        }
+    }
+
+    console.log(`[RAG] Created ${chunks.length} safe chunks for ${file.name}`);
 
     // Store document metadata
     await db.put(STORE_NAME, {
@@ -70,17 +92,45 @@ export const addDocument = async (file, text, embeddingModel = 'nomic-embed-text
 
             console.log(`[RAG] Embedding chunk ${i + 1}/${chunks.length}...`);
             
-            const response = await fetch(`${ollamaHost}/api/embeddings`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    model: embeddingModel,
-                    prompt: chunk
-                })
-            });
+            // Try newer /api/embed first, fallback to /api/embeddings
+            let response;
+            try {
+                response = await fetch(`${ollamaHost}/api/embed`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        model: embeddingModel,
+                        input: chunk
+                    })
+                });
+                
+                if (!response.ok) throw new Error("New API failed");
+                const data = await response.json();
+                const embedding = data.embeddings?.[0];
+                
+                if (embedding) {
+                    vectorData.push({
+                        id: uuidv4(),
+                        docId: docId,
+                        text: chunk,
+                        vector: embedding
+                    });
+                    continue; // Success
+                }
+            } catch (e) {
+                console.log("[RAG] /api/embed not supported or failed, falling back to /api/embeddings");
+                response = await fetch(`${ollamaHost}/api/embeddings`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        model: embeddingModel,
+                        prompt: chunk
+                    })
+                });
+            }
 
             if (!response.ok) {
-                throw new Error(`Embedding failed: ${response.statusText}`);
+                throw new Error(`Embedding failed: ${response.statusText} (500 often means Ollama is out of memory or model is too large)`);
             }
 
             const data = await response.json();
@@ -146,20 +196,66 @@ export const deleteDocument = async (id) => {
     await tx.done;
 };
 
-export const searchKnowledgeBase = async (query, model = 'nomic-embed-text', topK = 5, ollamaHost = 'http://192.168.0.136:11434') => {
+export const searchKnowledgeBase = async (query, model = 'nomic-embed-text', topK = 5, ollamaHost = 'http://localhost:11434') => {
+    if (!query || !query.trim()) return [];
+    
+    // Safety: Truncate very long queries for embedding. 
+    // RAG queries should be concise; very long ones are likely mistakes or full documents.
+    const safeQuery = query.length > 2000 ? query.substring(0, 2000) : query;
+    
     const db = await initDB();
 
+    // Verify model exists before requesting embeddings
+    try {
+        const tagsResponse = await fetch(`${ollamaHost}/api/tags`);
+        if (tagsResponse.ok) {
+            const data = await tagsResponse.json();
+            const exists = data.models?.some(m => m.name === model || m.name.split(':')[0] === model);
+            if (!exists) {
+                throw new Error(`Embedding model "${model}" not found. Please run "ollama pull ${model}"`);
+            }
+        }
+    } catch (e) {
+        if (e.message.includes('not found')) throw e;
+        console.warn("[RAG] Could not verify model existence:", e.message);
+    }
+
     // Generate query embedding
-    const response = await fetch(`${ollamaHost}/api/embeddings`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            model: model,
-            prompt: query
-        })
-    });
+    let response;
+    try {
+        response = await fetch(`${ollamaHost}/api/embed`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model: model,
+                input: [safeQuery] // Using array for better compatibility
+            })
+        });
+        
+        if (response.ok) {
+            const data = await response.json();
+            const queryEmbedding = data.embeddings?.[0];
+            if (queryEmbedding) {
+                return await computeResults(db, queryEmbedding, topK);
+            }
+        }
+        throw new Error("New API failed");
+    } catch (e) {
+        console.log("[RAG] /api/embed not supported or failed, falling back to /api/embeddings");
+        response = await fetch(`${ollamaHost}/api/embeddings`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model: model,
+                prompt: safeQuery
+            })
+        });
+    }
 
     if (!response.ok) {
+        if (response.status === 500) {
+            throw new Error(`Embedding failed (Internal Server Error). This model might not support embeddings or the input is too complex. Model: ${model}`);
+        }
         throw new Error(`Query embedding failed: ${response.statusText}`);
     }
 
@@ -170,6 +266,10 @@ export const searchKnowledgeBase = async (query, model = 'nomic-embed-text', top
         return [];
     }
 
+    return await computeResults(db, queryEmbedding, topK);
+};
+
+const computeResults = async (db, queryEmbedding, topK) => {
     // Get all vectors and compute similarity
     const allVectors = await db.getAll(VECTOR_STORE_NAME);
 
@@ -181,4 +281,27 @@ export const searchKnowledgeBase = async (query, model = 'nomic-embed-text', top
     results.sort((a, b) => b.score - a.score);
 
     return results.slice(0, topK);
+};
+
+export const unloadModel = async (ollamaHost, modelName) => {
+    if (!modelName) return;
+    console.log(`[RAG] 🧹 Unloading ${modelName} to free VRAM...`);
+    
+    try {
+        // Try generic generate endpoint (works for most) with keep_alive: 0
+        await fetch(`${ollamaHost}/api/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: modelName, keep_alive: 0 })
+        });
+        
+        // Also try chat endpoint explicitly
+        await fetch(`${ollamaHost}/api/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: modelName, keep_alive: 0 })
+        });
+    } catch (e) {
+        // Silent fail - we tried our best
+    }
 };

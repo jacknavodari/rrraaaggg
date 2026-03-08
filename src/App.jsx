@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Upload, FileText, MessageSquare, Database, Settings, Trash2, Search, Loader2, AlertCircle, CheckCircle, X, Cpu, Eye, Languages, Eraser, Download, Edit } from 'lucide-react';
 import { parseFile } from './services/fileProcessor';
-import { addDocument, getDocuments, deleteDocument, searchKnowledgeBase } from './services/knowledgeBase';
+import { addDocument, getDocuments, deleteDocument, searchKnowledgeBase, unloadModel } from './services/knowledgeBase';
 
 function App({ onReady }) {
   const [documents, setDocuments] = useState(() => {
@@ -38,6 +38,7 @@ function App({ onReady }) {
   const [editingMessageIndex, setEditingMessageIndex] = useState(null); // For editing messages
   const [editedMessageContent, setEditedMessageContent] = useState(''); // Edited content
   const [docToDelete, setDocToDelete] = useState(null); // For delete confirmation
+  const [isChatLoading, setIsChatLoading] = useState(false); // For chat response loading
 
   // Load documents on mount
   useEffect(() => {
@@ -347,6 +348,9 @@ Translate ALL of the text above to ${translationLanguage}. Do not skip anything.
   const handleFileUpload = async (files) => {
     setError(null);
     
+    // Unload chat model to free memory for OCR/Embeddings
+    await unloadModel(ollamaHost, chatModel);
+
     for (const file of files) {
       try {
         setProcessingStatus(`Processing ${file.name}...`);
@@ -384,14 +388,34 @@ Translate ALL of the text above to ${translationLanguage}. Do not skip anything.
   };
 
   const handleSendMessage = async () => {
-    if (!chatInput.trim()) return;
+    if (!chatInput.trim() || isChatLoading) return;
 
     const userMessage = chatInput;
-    console.log('[CHAT] Sending message (length:', userMessage.length, 'chars)');
-    console.log('[CHAT] First 200 chars:', userMessage.substring(0, 200));
-    
     setChatMessages(prev => [...prev, { role: 'user', content: userMessage }]);
     setChatInput('');
+    setIsChatLoading(true);
+
+    // Check if chat model exists
+    const chatModelExists = models.some(m => m.name === chatModel || m.name.split(':')[0] === chatModel);
+    if (models.length > 0 && !chatModelExists) {
+      setChatMessages(prev => [...prev, { 
+        role: 'system', 
+        content: `Error: Chat model "${chatModel}" not found. Please run "ollama pull ${chatModel}"` 
+      }]);
+      setIsChatLoading(false);
+      return;
+    }
+
+    // Check if embedding model exists (if not specifically asking about a document)
+    const embeddingModelExists = models.some(m => m.name === embeddingModel || m.name.split(':')[0] === embeddingModel);
+    if (models.length > 0 && !embeddingModelExists) {
+      setChatMessages(prev => [...prev, { 
+        role: 'system', 
+        content: `Error: Embedding model "${embeddingModel}" not found. Please run "ollama pull ${embeddingModel}"` 
+      }]);
+      setIsChatLoading(false);
+      return;
+    }
 
     // Check if user wants to see full document content
     const lowerMsg = userMessage.toLowerCase();
@@ -400,180 +424,114 @@ Translate ALL of the text above to ${translationLanguage}. Do not skip anything.
       // Find the most recent document and show it
       const lastDoc = documents[0];
       if (lastDoc && lastDoc.content) {
-        console.log(`[CHAT] Showing complete document: ${lastDoc.name} (${lastDoc.content.length} chars)`);
         setChatMessages(prev => [...prev, { 
           role: 'assistant', 
           content: `Here's the COMPLETE content of ${lastDoc.name} (${lastDoc.content.length} characters):\n\n${lastDoc.content}` 
         }]);
+        setIsChatLoading(false);
         return;
       }
     }
 
-    // Check if asking about a specific document
-    if (lowerMsg.includes('this document') || lowerMsg.includes('this file') || lowerMsg.includes('the pdf') || lowerMsg.includes('the file')) {
-      const lastDoc = documents[0];
-      if (lastDoc && lastDoc.content) {
-        console.log(`[CHAT] User asking about current document`);
-        console.log(`[CHAT] Document has ${lastDoc.content.length} chars, but user may have edited it`);
-        console.log(`[CHAT] Using user's EDITED version from input box (${userMessage.length} chars)`);
-        
-        // IMPORTANT: Use the EDITED text from input box, not original document!
-        // The user's modifications in chatInput are what should be processed
-        try {
-          const response = await fetch(`${ollamaHost}/api/chat`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              model: chatModel,
-              messages: [
-                {
-                  role: 'system',
-                  content: `You are a PROFESSIONAL TRANSLATOR. Your ONLY task is to translate text completely.
-
-CRITICAL RULES FOR TRANSLATION:
-1. Translate EVERY SINGLE WORD - do not skip anything
-2. Do NOT summarize, abbreviate, or shorten
-3. Translate section-by-section until COMPLETE
-4. Never say "etc" or leave parts untranslated
-5. Preserve ALL formatting, numbers, dates, names
-6. Continue translating until you reach the END of the text
-7. DO NOT stop mid-sentence - finish everything
-8. Output ONLY the translation - no explanations, no meta-commentary
-
-This is a FULL translation task. Partial translations are UNACCEPTABLE!
-Translate from the source language to the target language specified.`
-                },
-                {
-                  role: 'user',
-                  content: `Here is the COMPLETE document (${lastDoc.name}):
-
-${lastDoc.content}
-
-Question: ${userMessage}`
-                }
-              ],
-              stream: true,
-              options: {
-                temperature: 0.3,  // Lower for accurate translation
-                top_p: 0.9,
-                num_predict: 16384,  // Very high limit
-                repeat_penalty: 1.05
-              }
-            })
-          });
-
-          const reader = response.body.getReader();
-          const decoder = new TextDecoder();
-          let aiResponse = '';
-          let isFirstChunk = true;
-
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            const chunk = decoder.decode(value);
-            const lines = chunk.split('\n').filter(line => line.trim());
-
-            for (const line of lines) {
-              try {
-                const json = JSON.parse(line);
-                if (json.message?.content) {
-                  aiResponse += json.message.content;
-                  
-                  if (isFirstChunk) {
-                    setChatMessages(prev => [...prev, { role: 'assistant', content: aiResponse }]);
-                    isFirstChunk = false;
-                  } else {
-                    setChatMessages(prev => {
-                      const updated = [...prev];
-                      updated[updated.length - 1] = { role: 'assistant', content: aiResponse };
-                      return updated;
-                    });
-                  }
-                }
-              } catch (e) {
-                // Skip invalid JSON
-              }
-            }
-          }
-
-          return;
-        } catch (err) {
-          console.error("Error getting response:", err);
-          setChatMessages(prev => [...prev, { 
-            role: 'system', 
-            content: `Error: ${err.message}. Make sure Ollama is running at ${ollamaHost}` 
-          }]);
-          return;
-        }
-      }
-    }
-
     try {
-      // Search knowledge base for relevant context
-      const results = await searchKnowledgeBase(userMessage, embeddingModel, 10); // Increased from 5 to 10
+      let messages = [];
       
-      let context = '';
-      if (results && results.length > 0) {
-        context = results.map(r => r.text).join('\n\n');
+      // Branch 1: Specific document focus or very large input
+      // This handles cases where the user clicks "Send Document to Chat" or "Translate"
+      // or simply pastes a very large amount of text that shouldn't be RAG-searched.
+      const isDirectDocTask = 
+        lowerMsg.includes('this document') || 
+        lowerMsg.includes('this file') || 
+        lowerMsg.includes('the pdf') || 
+        lowerMsg.includes('the file') ||
+        lowerMsg.includes('complete document') ||
+        lowerMsg.includes('full document') ||
+        lowerMsg.includes('translation task') ||
+        lowerMsg.includes('document to translate') ||
+        userMessage.length > 3000; // Large inputs are treated as context directly
+
+      if (isDirectDocTask) {
+        const lastDoc = documents[0];
+        if (lastDoc && lastDoc.content) {
+          // Check if the user message ALREADY contains the document content to avoid doubling tokens
+          // We check for a significant snippet of the document
+          const contentSnippet = lastDoc.content.substring(0, 300);
+          const isRedundant = userMessage.includes(contentSnippet);
+
+          messages = [
+            {
+              role: 'system',
+              content: `You are a PROFESSIONAL TRANSLATOR and DOCUMENT ASSISTANT. 
+              If translating: Translate EVERY SINGLE WORD. Do NOT summarize. Output ONLY the translation.
+              If answering: Use the provided document text to answer thoroughly. 
+              Keep your response as long as necessary to fulfill the request completely.`
+            },
+            {
+              role: 'user',
+              content: isRedundant 
+                ? userMessage 
+                : `Document: ${lastDoc.name}\n\nContent:\n${lastDoc.content}\n\nQuestion/Task: ${userMessage}`
+            }
+          ];
+        }
+      } 
+      
+      // Branch 2: RAG Search (default for normal length queries)
+      if (messages.length === 0) {
+        // Unload chat model before embedding search to save memory
+        await unloadModel(ollamaHost, chatModel);
+        
+        const results = await searchKnowledgeBase(userMessage, embeddingModel, 10, ollamaHost);
+        const context = results?.length > 0 ? results.map(r => r.text).join('\n\n') : 'No specific document context found.';
+        
+        // Unload embedding model before chat generation to save memory
+        await unloadModel(ollamaHost, embeddingModel);
+
+        messages = [
+          {
+            role: 'system',
+            content: `You are a helpful AI assistant. Use the provided context to answer the user's question. If asked to translate, translate the context or the question as requested.`
+          },
+          {
+            role: 'user',
+            content: `Context:\n${context}\n\nQuestion: ${userMessage}`
+          }
+        ];
       }
 
-      console.log(`[CHAT] Sending request with context length: ${context.length} chars`);
-      console.log(`[CHAT] Number of chunks: ${results?.length || 0}`);
-
-      // Send to LLM with context
       const response = await fetch(`${ollamaHost}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: chatModel,
-          messages: [
-            {
-              role: 'system',
-              content: `You are a helpful, conversational AI assistant. You have access to document context and can answer questions naturally.
-
-IMPORTANT RULES:
-1. Be conversational and friendly, not robotic
-2. When asked about documents, provide COMPLETE information - never summarize briefly unless asked
-3. If user asks to "show all", "display everything", or "full content" - provide the ENTIRE text without holding back
-4. Don't be fixed or rigid - adapt to what the user wants
-5. Provide detailed, thorough responses by default
-6. Use natural language, not formal/corporate speak
-7. If there's relevant context from documents, share it ALL
-8. **CRITICAL**: When asked to TRANSLATE, you MUST translate EVERYTHING - no skipping, no summarizing, no partial translations
-9. Translate the COMPLETE text word-for-word or section-by-section until done
-10. Never say "here's a summary" when asked to translate - give FULL translation
-
-Remember: User wants complete, natural conversations - not short summaries! For translation tasks: COMPLETE coverage is MANDATORY!`
-            },
-            {
-              role: 'user',
-              content: `Context from documents (use this to answer thoroughly):\n${context}\n\nQuestion: ${userMessage}`
-            }
-          ],
+          messages: messages,
           stream: true,
           options: {
-            temperature: 0.7,
-            top_p: 0.9,
-            num_predict: 8192,  // Increased from 4096 for long translations
-            repeat_penalty: 1.1
+            temperature: 0.3,
+            num_predict: 8192,
+            num_ctx: 32768 // Ensure large documents fit in context
           }
         })
       });
+
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let aiResponse = '';
       let isFirstChunk = true;
+      let buffer = '';
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n').filter(line => line.trim());
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // Keep partial line in buffer
 
         for (const line of lines) {
+          if (!line.trim()) continue;
           try {
             const json = JSON.parse(line);
             if (json.message?.content) {
@@ -591,17 +549,18 @@ Remember: User wants complete, natural conversations - not short summaries! For 
               }
             }
           } catch (e) {
-            // Skip invalid JSON
+            console.warn('[CHAT] Failed to parse JSON line:', line);
           }
         }
       }
-
     } catch (err) {
       console.error("Chat error:", err);
       setChatMessages(prev => [...prev, { 
         role: 'system', 
-        content: `Error: ${err.message}. Make sure Ollama is running at ${ollamaHost}` 
+        content: `Error: ${err.message}. Make sure Ollama is running at ${ollamaHost} and the model "${chatModel}" is pulled.` 
       }]);
+    } finally {
+      setIsChatLoading(false);
     }
   };
 
@@ -691,11 +650,19 @@ Remember: User wants complete, natural conversations - not short summaries! For 
               {models.length === 0 ? (
                 <option value="nomic-embed-text">nomic-embed-text (default)</option>
               ) : (
-                models.map(m => (
-                  <option key={`embed-${m.name}`} value={m.name}>
-                    {m.name} {m.name.includes('embed') ? '🧠' : ''}
-                  </option>
-                ))
+                [...models]
+                  .sort((a, b) => {
+                    const aIsEmbed = a.name.includes('embed');
+                    const bIsEmbed = b.name.includes('embed');
+                    if (aIsEmbed && !bIsEmbed) return -1;
+                    if (!aIsEmbed && bIsEmbed) return 1;
+                    return 0;
+                  })
+                  .map(m => (
+                    <option key={`embed-${m.name}`} value={m.name}>
+                      {m.name} {m.name.includes('embed') ? '🧠 (Recommended)' : '⚠️ (Not an embedding model)'}
+                    </option>
+                  ))
               )}
             </select>
           </div>
@@ -940,7 +907,17 @@ Remember: User wants complete, natural conversations - not short summaries! For 
                 </div>
               </div>
             ))}
-            {chatMessages.length === 0 && (
+            
+            {isChatLoading && (
+              <div className="flex justify-start">
+                <div className="bg-slate-800 text-slate-200 rounded-lg p-4 flex items-center gap-2">
+                  <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
+                  <span className="text-sm italic">AI is thinking...</span>
+                </div>
+              </div>
+            )}
+
+            {chatMessages.length === 0 && !isChatLoading && (
               <div className="text-center text-slate-500 mt-20">
                 <MessageSquare className="w-16 h-16 mx-auto mb-4 opacity-20" />
                 <p>Ask questions about your documents</p>

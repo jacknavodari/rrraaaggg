@@ -7,7 +7,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   import.meta.url
 ).toString();
 
-export const parseFile = async (file, ocrModel = 'deepseek-ocr:latest', ollamaHost = 'http://192.168.0.136:11434', onProgress) => {
+export const parseFile = async (file, ocrModel = 'deepseek-ocr:latest', ollamaHost = 'http://localhost:11434', onProgress) => {
     const fileType = file.type;
     const fileName = file.name.toLowerCase();
 
@@ -125,7 +125,22 @@ const parseText = async (file) => {
 };
 
 const runOCR = async (ocrModel, base64Image, ollamaHost, onProgress) => {
-    console.log(`[OCR v2.4] Starting OCR with model: ${ocrModel}`);
+    console.log(`[OCR v2.5] Starting OCR with model: ${ocrModel}`);
+
+    // Verify model exists before starting
+    try {
+        const tagsResponse = await fetch(`${ollamaHost}/api/tags`);
+        if (tagsResponse.ok) {
+            const data = await tagsResponse.json();
+            const exists = data.models?.some(m => m.name === ocrModel || m.name.split(':')[0] === ocrModel);
+            if (!exists) {
+                throw new Error(`OCR model "${ocrModel}" not found in Ollama. Please run "ollama pull ${ocrModel}"`);
+            }
+        }
+    } catch (e) {
+        if (e.message.includes('not found')) throw e;
+        console.warn("[OCR] Could not verify model existence:", e.message);
+    }
     
     const response = await fetch(`${ollamaHost}/api/chat`, {
         method: 'POST',
